@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -e
+
+if [ -z "$1" ]; then
+  echo "Usage: verify TEMPLATE"
+    exit 1;
+    fi
+
+    template="$(pwd)/$1"
+
+    cd /tmp
+    rm -rf stack-template-test
+    stack new stack-template-test "$template"
+    cd stack-template-test
+    make dev

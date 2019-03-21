@@ -1,0 +1,900 @@
+{-# START_FILE .gitignore #-}
+.stack-work/
+{{name}}.cabal
+*~
+{-# START_FILE ChangeLog.md #-}
+# Changelog for yesod-persistent
+
+## Unreleased changes
+{-# START_FILE LICENSE #-}
+Copyright Author name here (c) 2019
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+    * Neither the name of Author name here nor the names of other
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+{-# START_FILE Makefile #-}
+PROJECT_ID=fluent-cosine-206514
+RELEASE_DOCKER_IMG = gcr.io/${PROJECT_ID}/{{name}}:${VERSION}
+BUILD_DOCKER_IMG = {{name}}-build:latest
+
+build_base:
+	docker build -t thiagorp/{{name}}-buildbase:latest -f Dockerfile.buildbase .
+	docker push thiagorp/{{name}}-buildbase:latest
+
+auth_container_registry:
+	echo ${GCLOUD_KEY_JSON} | base64 --decode --ignore-garbage > ${HOME}/gcloud-service-key.json
+	docker login -u _json_key --password-stdin https://gcr.io < ${HOME}/gcloud-service-key.json
+
+build:
+	stack install --local-bin-path application
+	docker build -t ${RELEASE_DOCKER_IMG} -f Dockerfile.release .
+
+push: auth_container_registry
+	docker push ${RELEASE_DOCKER_IMG}
+
+notify_coolops:
+	curl -L https://github.com/coolops-io/coolops/releases/download/v0.2.0/install.sh | sh
+	coolops build:new:circleci -p DOCKER_IMAGE=${RELEASE_DOCKER_IMG}
+
+dev:
+	ghcid --command "stack ghci {{name}}:lib" --test "Executables.Api.run"
+{-# START_FILE README.md #-}
+# yesod-persistent
+{-# START_FILE Setup.hs #-}
+import Distribution.Simple
+main = defaultMain
+{-# START_FILE app/Main.hs #-}
+module Main where
+
+import qualified Executables.Api as Api
+
+main :: IO ()
+main = Api.run
+{-# START_FILE package.yaml #-}
+name: {{name}}
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+default-extensions:
+- NoImplicitPrelude
+
+ghc-options:
+- -Wall
+- -Wcompat
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wredundant-constraints
+
+dependencies:
+- aeson
+- base >= 4.7 && < 5
+- base16-bytestring
+- connection
+- data-default-class
+- directory
+- email-validate
+- esqueleto
+- http-client
+- http-client-tls
+- http-types
+- megaparsec
+- monad-logger
+- persistent
+- persistent-postgresql
+- persistent-template
+- random
+- rio
+- scrypt
+- time
+- uuid
+- yesod-core
+- wai
+- wai-cors
+- wai-extra
+- warp
+
+library:
+  source-dirs: src
+
+executables:
+  {{name}}-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - {{name}}
+
+tests:
+  {{name}}-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - {{name}}
+
+{-# START_FILE src/Api/Authorization.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Api.Authorization
+  ( userAuth
+  ) where
+
+import Import hiding (Handler)
+
+import RIO.Text (pack)
+
+import Network.HTTP.Types.Status
+import Network.Wai (requestHeaders)
+import Text.Megaparsec as Parser
+import Text.Megaparsec.Char
+import Yesod.Core
+
+type Handler = HandlerFor Env
+
+runAppInHandler :: App a -> Handler a
+runAppInHandler m = do
+  env <- getYesod
+  runRIO env $ runDb m
+
+unauthorized :: Handler a
+unauthorized = sendResponseStatus unauthorized401 ()
+
+userAuth :: (Entity User -> Handler a) -> Handler a
+userAuth handler = do
+  authToken <- readToken
+  maybeUser <- runAppInHandler $ getBy (UniqueAccessToken authToken)
+  case maybeUser of
+    Just user -> handler user
+    Nothing -> unauthorized
+
+readToken :: Handler AccessToken
+readToken = do
+  req <- waiRequest
+  let authHeader = fromMaybe "" $ lookup "authorization" (requestHeaders req)
+  case parseAuthHeader (decodeUtf8Lenient authHeader) of
+    Just authToken -> return (AccessToken authToken)
+    Nothing -> unauthorized
+
+parseAuthHeader :: Text -> Maybe Text
+parseAuthHeader = parseMaybe authHeaderParser
+
+authHeaderParser :: Parsec Void Text Text
+authHeaderParser = pack <$> (string' "Token " >> Parser.some asciiChar)
+{-# START_FILE src/Api/Handler.hs #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
+
+module Api.Handler
+  ( Handler
+  , module Yesod.Core
+  ) where
+
+import App
+import Yesod.Core
+
+import Api.Routes
+
+import Api.Handlers.HealthCheck
+
+mkYesodDispatch "Env" resourcesEnv
+
+instance Yesod Env
+{-# START_FILE src/Api/Handlers/HealthCheck.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Api.Handlers.HealthCheck
+  ( getHealthR
+  ) where
+
+import RIO hiding (Handler)
+
+import Api.Import
+
+getHealthR :: Handler Value
+getHealthR = return $ object ["healthy" .= True]
+{-# START_FILE src/Api/Import.hs #-}
+module Api.Import
+  ( module Export
+  , runAppInHandler
+  ) where
+
+import Import hiding
+  ( Handler
+  , LogLevel(..)
+  , logDebug
+  , logDebugS
+  , logError
+  , logErrorS
+  , logInfo
+  , logInfoS
+  , logOther
+  , logOtherS
+  , logWarn
+  , logWarnS
+  )
+
+import Api.Authorization as Export
+import Api.Routes as Export
+import Data.Aeson as Export
+import Network.HTTP.Types.Status as Export
+import Network.Wai as Export (requestHeaders)
+import Yesod.Core as Export
+
+runAppInHandler :: App a -> Handler a
+runAppInHandler m = do
+  env <- getYesod
+  runRIO env $ runDb m
+{-# START_FILE src/Api/Routes.hs #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
+
+module Api.Routes where
+
+import Yesod.Core
+
+import Import
+
+mkYesodData "Env" [parseRoutes|
+/health HealthR GET
+|]
+{-# START_FILE src/App.hs #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE FlexibleInstances #-}
+
+module App
+  ( App
+  , Env(..)
+  , HasEnv(..)
+  , buildEnv
+  , runApp
+  , runDb
+  ) where
+
+import RIO
+
+import Database
+import Environment (PGSettings(..), pgSettings)
+
+import Control.Monad.Logger
+import qualified Database.Persist.Postgresql as Persist
+import Network.Connection (TLSSettings(..))
+import qualified Network.HTTP.Client as Http
+import Network.HTTP.Client.TLS
+
+type App a = Db (RIO Env) a
+
+data Env = Env
+  { persistentConnPool :: Persist.ConnectionPool
+  , requestManager :: Http.Manager
+  }
+
+class HasEnv m where
+  getEnv :: m Env
+
+instance HasEnv (RIO Env) where
+  getEnv = ask
+
+instance HasEnv (Db (RIO Env)) where
+  getEnv = lift ask
+
+acquirePersistPool :: Int -> IO Persist.ConnectionPool
+acquirePersistPool size = do
+  s <- Environment.pgSettings
+  runNoLoggingT $ Persist.createPostgresqlPool (Environment.pgUrl s) size
+
+buildEnv :: Int -> IO Env
+buildEnv poolSize = do
+  reqManager <- newTlsManagerWith (mkManagerSettings (TLSSettingsSimple True False False) Nothing)
+  persistPool <- acquirePersistPool poolSize
+  return $ Env persistPool reqManager
+
+runDb :: (HasEnv m, MonadUnliftIO m) => Db m a -> m a
+runDb query = do
+  pool <- persistentConnPool <$> getEnv
+  runSqlPool query pool
+
+runApp :: Env -> App a -> IO a
+runApp env = runRIO env . runDb
+
+{-# START_FILE src/Database.hs #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RankNTypes #-}
+
+module Database
+  ( module Database
+  , module Database.Esqueleto
+  ) where
+
+import RIO
+
+import Database.Esqueleto hiding (selectFirst)
+import Database.Esqueleto.Internal.Sql (SqlQuery, SqlSelect, select)
+
+type Db m = ReaderT SqlBackend m
+
+selectFirst :: (MonadIO m, SqlSelect a r) => SqlQuery a -> SqlReadT m (Maybe r)
+selectFirst query = do
+  res <- select (limit 1 >> query)
+  case res of
+    (x:_) -> return (Just x)
+    _ -> return Nothing
+
+{-# START_FILE src/Database/Migrations.hs #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Database.Migrations (migrateDb) where
+
+import RIO
+import qualified RIO.Text as Text
+import qualified RIO.List as List
+
+import System.Directory
+import Control.Monad.Logger
+import Database.Persist.Postgresql
+
+import Environment
+
+runInitialMigration :: SqlBackend -> LoggingT IO ()
+runInitialMigration = runSqlConn $ rawExecute q []
+  where
+    q =
+      "create table if not exists schema_migrations \
+      \ (name text primary key not null)"
+
+migrationFiles :: LoggingT IO [FilePath]
+migrationFiles = liftIO $ listDirectory "migrations"
+
+executedMigrations :: SqlBackend -> LoggingT IO [Text]
+executedMigrations backend = map unSingle <$> runSqlConn (rawSql q []) backend
+  where
+    q =
+      "select name from schema_migrations"
+
+migrationsToExecute :: SqlBackend -> LoggingT IO [FilePath]
+migrationsToExecute backend = do
+  files <- migrationFiles
+  migrations <- executedMigrations backend
+  return $ List.sort $ filter (needsRunning migrations) files
+  where
+    needsRunning migrations file =
+      Text.pack file `notElem` migrations
+
+runSingleMigration :: SqlBackend -> FilePath -> LoggingT IO ()
+runSingleMigration backend file = do
+  q <- liftIO $ readFileUtf8 ("migrations/" <> file)
+  runSqlConn (rawExecute q []) backend
+  runSqlConn (rawExecute "insert into schema_migrations values (?)" [PersistText (Text.pack file)]) backend
+
+runMigrationFiles :: SqlBackend -> LoggingT IO ()
+runMigrationFiles backend = do
+  toExecute <- migrationsToExecute backend
+  traverse_ (runSingleMigration backend) toExecute
+
+doMigrate :: SqlBackend -> LoggingT IO ()
+doMigrate backend = do
+  runSqlConn (rawExecute "SET client_min_messages TO WARNING" []) backend
+  runInitialMigration backend
+  runMigrationFiles backend
+  runSqlConn (rawExecute "SET client_min_messages TO WARNING" []) backend
+
+migrateDb :: IO ()
+migrateDb = do
+  s <- pgSettings
+  runStdoutLoggingT $ withPostgresqlConn (pgUrl s) doMigrate
+
+{-# START_FILE src/Environment.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Environment where
+
+import RIO
+import RIO.Map as M
+import RIO.Process
+import RIO.Text (unpack)
+
+newtype PGSettings = PGSettings
+  { pgUrl :: ByteString
+  }
+
+appPort :: IO Int
+appPort = do
+  envPort <- M.lookup "PORT" <$> envVars
+  case unpack <$> envPort >>= readMaybe of
+    Nothing -> return 3000
+    Just port -> return port
+
+pgSettings :: IO PGSettings
+pgSettings = do
+  pgUrl <- encodeUtf8 <$> envVar "DATABASE_URL" "postgresql://localhost/{{name}}-dev"
+  return $ PGSettings {..}
+
+envVar :: Text -> Text -> IO Text
+envVar key defaultValue = do
+  maybeValue <- M.lookup key <$> envVars
+  return $ fromMaybe defaultValue maybeValue
+
+envVars :: IO EnvVars
+envVars = view envVarsL <$> mkDefaultProcessContext
+
+{-# START_FILE src/Executables/Api.hs #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Executables.Api (run) where
+
+import RIO
+import qualified RIO.ByteString as BS
+import qualified RIO.Text as T
+
+import Data.Default.Class (def)
+import Network.Wai (Middleware, Request)
+import qualified Network.Wai.Handler.Warp as Warp
+import Network.Wai.Middleware.Cors
+import Network.Wai.Middleware.Gzip
+import Network.Wai.Middleware.RequestLogger
+
+import Api.Handler
+
+import App
+import Environment (appPort)
+import Database.Migrations
+import Util.RequestLogger
+
+exceptionHandler :: Maybe Request -> SomeException -> IO ()
+exceptionHandler r e = do
+  BS.putStr ("Error: " <> T.encodeUtf8 (T.pack $ show e))
+  Warp.defaultOnException r e
+
+settings :: Int -> Warp.Settings
+settings port = Warp.setPort port $ Warp.setOnException exceptionHandler Warp.defaultSettings
+
+corsMiddleware :: Middleware
+corsMiddleware = cors $ const (Just policy)
+  where
+    policy =
+      simpleCorsResourcePolicy
+        { corsRequestHeaders = ["content-type", "authorization"]
+        , corsMethods = ["GET", "HEAD", "POST", "PATCH", "DELETE"]
+        }
+
+mkApp :: Env -> IO Application
+mkApp env = do
+  logger <- mkRequestLogger def {outputFormat = CustomOutputFormatWithDetails jsonLogger}
+  appPlain <- toWaiAppPlain env
+  return $ gzip def $ corsMiddleware $ logger appPlain
+
+run :: IO ()
+run = do
+  migrateDb
+  env <- buildEnv 10
+  port <- appPort
+  app <- mkApp env
+  Warp.runSettings (settings port) app
+
+{-# START_FILE src/Import.hs #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+
+module Import
+  ( module Export
+  ) where
+
+import Database.Persist as Export
+import Database.Persist.Sql as Export hiding (LogFunc)
+
+import App as Export
+import Model as Export
+import RIO as Export
+{-# START_FILE src/Model.hs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+
+module Model
+  ( module Model
+  , module Util.UUID
+  , AccessToken(..)
+  , EmailAddress
+  , Entity(..)
+  , RawPassword
+  , UTCTime
+  , getCurrentTime
+  , protectPassword
+  ) where
+
+import RIO
+
+import Data.Time
+import Database.Persist (Entity(..))
+import Database.Persist.TH
+
+import Util.AccessToken
+import Util.EmailAddress
+import Util.Password
+import Util.UUID
+import Util.Validation
+
+type UserName = Validated (SizeGreaterThan 2) Text
+
+type Slug = Validated (IsSlug && SizeGreaterThan 1) Text
+
+share
+  [mkPersist sqlSettings, mkMigrate "migrateAll"]
+  [persistLowerCase|
+User sql=users
+  Id UUID default=uuid_generate_v4()
+  firstName UserName sqltype=varchar(255)
+  lastName UserName sqltype=varchar(255)
+  email EmailAddress sqltype=varchar(255)
+  password SafePassword sqltype=varchar(255)
+  accessToken AccessToken sqltype=varchar(255)
+  createdAt UTCTime
+  updatedAt UTCTime
+  UniqueEmail email
+  UniqueAccessToken accessToken
+  deriving (Show)
+|]
+{-# START_FILE src/Util/AccessToken.hs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Util.AccessToken
+  ( AccessToken(..)
+  , genAccessToken
+  ) where
+
+import RIO
+import qualified RIO.ByteString as BS
+
+import Data.Aeson
+import Database.Persist.Sql
+import qualified Data.ByteString.Base16 as B16
+import System.Random (Random(randomIO))
+
+newtype AccessToken =
+  AccessToken Text
+  deriving (PersistField, PersistFieldSql, Show)
+
+genAccessToken :: (MonadIO m) => m AccessToken
+genAccessToken = genAccessToken' 36 ""
+
+genAccessToken' :: (MonadIO m) => Integer -> ByteString -> m AccessToken
+genAccessToken' size acc = do
+  randomChar <- liftIO randomIO
+  let token = acc <> B16.encode (BS.pack [randomChar])
+  case size of
+    0 -> return $ AccessToken (decodeUtf8Lenient token)
+    _ -> genAccessToken' (size - 1) token
+
+instance ToJSON AccessToken where
+  toJSON (AccessToken token) = toJSON token
+{-# START_FILE src/Util/EmailAddress.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Util.EmailAddress
+  ( EmailAddress(..)
+  , emailAddressToText
+  ) where
+
+import RIO
+import qualified RIO.Text as Text
+
+import Data.Aeson
+import Database.Persist.Sql
+import qualified Text.Email.Validate as TEV (EmailAddress, emailAddress, toByteString, validate)
+
+emailAddressToText :: EmailAddress -> Text
+emailAddressToText (EmailAddress email) = decodeUtf8Lenient $ TEV.toByteString email
+
+newtype EmailAddress =
+  EmailAddress TEV.EmailAddress
+  deriving (Show)
+
+instance PersistField EmailAddress where
+  toPersistValue (EmailAddress email) = PersistText $ decodeUtf8Lenient $ TEV.toByteString email
+  fromPersistValue (PersistText v) =
+    case TEV.validate (encodeUtf8 v) of
+      Left err -> Left $ Text.pack err
+      Right email -> Right (EmailAddress email)
+  fromPersistValue (PersistByteString v) =
+    case TEV.validate v of
+      Left err -> Left $ Text.pack err
+      Right email -> Right (EmailAddress email)
+  fromPersistValue _ = Left "Email address needs to be either a text or a bytestring"
+
+instance PersistFieldSql EmailAddress where
+  sqlType _ = SqlString
+
+instance FromJSON EmailAddress where
+  parseJSON =
+    withText "EmailAddress" $ \t ->
+      case TEV.emailAddress $ encodeUtf8 t of
+        Nothing -> fail "Failed to parse email address"
+        Just email -> return (EmailAddress email)
+{-# START_FILE src/Util/Password.hs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Util.Password
+  ( SafePassword
+  , RawPassword
+  , passwordMatch
+  , protectPassword
+  ) where
+
+import RIO
+
+import Data.Aeson (FromJSON)
+import Crypto.Scrypt (EncryptedPass(..), Pass(..), encryptPassIO', verifyPass')
+import Database.Persist.Sql
+
+import Util.Validation
+
+newtype RawPassword =
+  RawPassword (Validated (SizeGreaterThan 8) ByteString)
+  deriving (FromJSON)
+
+newtype SafePassword =
+  SafePassword ByteString
+
+instance Show SafePassword where
+  show _ = "[Password]"
+
+passwordMatch :: SafePassword -> ByteString -> Bool
+passwordMatch (SafePassword safe) raw = verifyPass' (Pass raw) (EncryptedPass safe)
+
+protectPassword :: (MonadIO m) => RawPassword -> m SafePassword
+protectPassword (RawPassword p) = liftIO $ SafePassword . getEncryptedPass <$> encryptPassIO' (Pass (getValue p))
+
+instance PersistField SafePassword where
+  toPersistValue (SafePassword p) = PersistText $ decodeUtf8Lenient p
+  fromPersistValue (PersistText v) = Right $ SafePassword (encodeUtf8 v)
+  fromPersistValue (PersistByteString v) = Right $ SafePassword v
+  fromPersistValue _ = Left "Password needs to be either a text or a bytestring"
+
+instance PersistFieldSql SafePassword where
+  sqlType _ = SqlString
+{-# START_FILE src/Util/RequestLogger.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+module Util.RequestLogger (jsonLogger) where
+
+import RIO
+import qualified RIO.ByteString as BS
+import qualified RIO.ByteString.Lazy as LBS
+import qualified RIO.HashMap as HM
+
+import Data.Aeson
+
+import Network.Wai.Middleware.RequestLogger
+import Network.Wai.Middleware.RequestLogger.JSON
+
+jsonLogger :: OutputFormatterWithDetails
+jsonLogger date req status responseSize duration reqBody =
+  formatAsJSON date req status responseSize duration (removeSensitiveInformation reqBody)
+
+removeSensitiveInformation :: [ByteString] -> [ByteString]
+removeSensitiveInformation body = [ removePassword . BS.concat $ body ]
+
+removePassword :: ByteString -> ByteString
+removePassword body =
+  case decodeStrict body of
+    Just (Object jsonBody) ->
+      LBS.toStrict . encode $ HM.mapWithKey hideIfPassword jsonBody
+
+    _ ->
+      body
+
+hideIfPassword :: Text -> Value -> Value
+hideIfPassword "password" _ = String "[Password]"
+hideIfPassword _ v = v
+{-# START_FILE src/Util/Slug.hs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+
+module Util.Slug
+  ( Slug
+  , isValidSlug
+  , slug
+  ) where
+
+import RIO hiding (many)
+import qualified RIO.Text as Text
+
+import Data.Char (isAsciiLower)
+import Text.Megaparsec
+import Text.Megaparsec.Char
+
+newtype Slug =
+  Slug Text
+  deriving (Show)
+
+slugChar :: (MonadParsec e s m, Token s ~ Char) => m (Token s)
+slugChar = satisfy isAsciiLower <?> "slug letter"
+
+slugParser :: Parsec Void Text Slug
+slugParser = do
+  s <- many (slugChar <|> digitChar <|> char '-')
+  return (Slug (Text.pack s))
+
+slug :: Text -> Maybe Slug
+slug = parseMaybe slugParser
+
+isValidSlug :: Text -> Bool
+isValidSlug = isJust . slug
+{-# START_FILE src/Util/UUID.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+module Util.UUID
+  ( module ExposedUUID
+  , genUUID
+  , textToUUID
+  , uuidToText
+  ) where
+
+import RIO
+import qualified RIO.Text as Text
+
+import Data.UUID as UUID
+import Data.UUID as ExposedUUID (UUID)
+import Data.UUID.V4 as UUID (nextRandom)
+import Database.Persist.Sql
+import Yesod.Core.Dispatch
+
+genUUID :: (MonadIO m) => m UUID
+genUUID = liftIO UUID.nextRandom
+
+textToUUID :: Text -> Maybe UUID
+textToUUID = UUID.fromString . Text.unpack
+
+uuidToText :: UUID -> Text
+uuidToText = UUID.toText
+
+instance PersistField UUID where
+  toPersistValue = PersistDbSpecific . encodeUtf8 . Text.pack . UUID.toString
+  fromPersistValue (PersistDbSpecific t) =
+    case UUID.fromString $ Text.unpack $ decodeUtf8Lenient t of
+      Just x -> Right x
+      Nothing -> Left "Invalid UUID"
+  fromPersistValue _ = Left "Not PersistDBSpecific"
+
+instance PersistFieldSql UUID where
+  sqlType _ = SqlOther "uuid"
+
+instance PathPiece UUID where
+  fromPathPiece = UUID.fromText
+  toPathPiece = UUID.toText
+{-# START_FILE src/Util/Validation.hs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+
+module Util.Validation
+  ( IsSlug
+  , SizeGreaterThan
+  , Validated
+  , type (&&)
+  , getValue
+  ) where
+
+import RIO
+import qualified RIO.ByteString as ByteString
+import qualified RIO.Text as Text
+
+import Data.Aeson
+import Data.Aeson.Types (Parser)
+import Database.Persist.Sql
+import GHC.TypeLits (KnownNat, Nat, natVal)
+
+import Util.Slug
+
+newtype Validated p x =
+  Validated x
+  deriving (PersistField, PersistFieldSql, ToJSON, Show)
+
+parseJSON_ :: (Predicate p a) => a -> Parser (Validated p a)
+parseJSON_ t =
+  case validate t of
+    Left err -> fail err
+    Right x -> return x
+
+instance (Predicate p Text) => FromJSON (Validated p Text) where
+  parseJSON = withText "Text" parseJSON_
+
+instance (Predicate p ByteString) => FromJSON (Validated p ByteString) where
+  parseJSON = withText "Text" $ \t -> parseJSON_ (encodeUtf8 t)
+
+class Predicate p x where
+  validate :: x -> Either String (Validated p x)
+
+data SizeGreaterThan (n :: Nat)
+
+data IsSlug
+
+data (&&) l r
+
+validateSizeGreaterThan :: (KnownNat n) => proxy n -> (a -> Int) -> a -> Either String (Validated (SizeGreaterThan n) a)
+validateSizeGreaterThan nat sizeFn text =
+  if textSize > minSize
+    then Right (Validated text)
+    else Left errorMessage
+  where
+    textSize = sizeFn text
+    minSize = fromIntegral $ natVal nat
+    errorMessage = "needs to be bigger than " <> show minSize <> " characters"
+
+instance (KnownNat n) => Predicate (SizeGreaterThan n) Text where
+  validate = validateSizeGreaterThan (Proxy @n) Text.length
+
+instance (KnownNat n) => Predicate (SizeGreaterThan n) ByteString where
+  validate = validateSizeGreaterThan (Proxy @n) ByteString.length
+
+instance Predicate IsSlug Text where
+  validate text =
+    if isValidSlug text
+      then Right (Validated text)
+      else Left "is not a valid slug"
+
+instance (Predicate m x, Predicate n x) => Predicate (m && n) x where
+  validate text = validate @m text >> validate @n text >> Right (Validated text)
+
+getValue :: Validated p x -> x
+getValue (Validated value) = value
+{-# START_FILE test/Spec.hs #-}
+main :: IO ()
+main = putStrLn "Test suite not yet implemented"
