@@ -290,21 +290,6 @@ module Api.Import
   , runAppInHandler
   ) where
 
-import Import hiding
-  ( Handler
-  , LogLevel(..)
-  , logDebug
-  , logDebugS
-  , logError
-  , logErrorS
-  , logInfo
-  , logInfoS
-  , logOther
-  , logOtherS
-  , logWarn
-  , logWarnS
-  )
-
 import Import as Export hiding
   ( Handler
   , LogLevel(..)
