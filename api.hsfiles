@@ -211,6 +211,8 @@ import Yesod.Core
 import Api.Routes
 
 import Api.Handlers.HealthCheck
+import Api.Handlers.Login
+import Api.Handlers.Signup
 
 mkYesodDispatch "Env" resourcesEnv
 
@@ -228,6 +230,50 @@ import Api.Import
 
 getHealthR :: Handler Value
 getHealthR = return $ object ["healthy" .= True]
+{-# START_FILE src/Api/Handlers/Login.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Api.Handlers.Login
+  ( postTokensR
+  ) where
+
+import Api.Import
+
+import qualified UseCases.Login as App
+
+data Request = Request
+  { reqEmail :: !EmailAddress
+  , reqPassword :: !Text
+  }
+
+instance FromJSON Request where
+  parseJSON =
+    withObject "" $ \o -> do
+      reqEmail <- o .: "email"
+      reqPassword <- o .: "password"
+      return Request {..}
+
+newtype Response = Response
+  { resAccessToken :: AccessToken
+  }
+
+instance ToJSON Response where
+  toJSON Response {..} = object ["access_token" .= resAccessToken]
+
+mapParams :: Request -> App.Params
+mapParams Request {..} = App.Params reqEmail reqPassword
+
+buildResponse :: User -> Response
+buildResponse User {..} = Response {resAccessToken = userAccessToken}
+
+postTokensR :: Handler Value
+postTokensR = do
+  requestData <- mapParams <$> requireCheckJsonBody
+  result <- runAppInHandler $ App.login requestData
+  case result of
+    Just u -> return $ toJSON $ buildResponse u
+    Nothing -> sendResponseStatus unauthorized401 ()
 {-# START_FILE src/Api/Handlers/Signup.hs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -333,6 +379,8 @@ import Import
 
 mkYesodData "Env" [parseRoutes|
 /health HealthR GET
+/signup SignupR POST
+/tokens TokensR POST
 |]
 {-# START_FILE src/App.hs #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -639,6 +687,34 @@ User sql=users
   UniqueAccessToken accessToken
   deriving (Show)
 |]
+{-# START_FILE src/UseCases/Login.hs #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module UseCases.Login
+  ( Params(..)
+  , login
+  ) where
+
+import Import
+import Util.Password (passwordMatch)
+
+data Params = Params
+  { paramEmail :: !EmailAddress
+  , paramPassword :: !Text
+  }
+
+verify :: Text -> User -> Maybe User
+verify password user =
+  if passwordMatch (userPassword user) (encodeUtf8 password)
+    then Just user
+    else Nothing
+
+login :: Params -> App (Maybe User)
+login Params {..} = do
+  maybeUser <- getBy (UniqueEmail paramEmail)
+  case maybeUser of
+    Nothing -> return Nothing
+    Just (Entity _ user) -> return $ verify paramPassword user
 {-# START_FILE src/UseCases/Signup.hs #-}
 {-# LANGUAGE RecordWildCards #-}
 
