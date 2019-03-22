@@ -228,6 +228,62 @@ import Api.Import
 
 getHealthR :: Handler Value
 getHealthR = return $ object ["healthy" .= True]
+{-# START_FILE src/Api/Handlers/Signup.hs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Api.Handlers.Signup
+  ( postSignupR
+  ) where
+
+import Api.Import
+
+import qualified UseCases.Signup as App
+
+data Request = Request
+  { reqFirstName :: !UserName
+  , reqLastName :: !UserName
+  , reqEmail :: !EmailAddress
+  , reqPassword :: !RawPassword
+  }
+
+instance FromJSON Request where
+  parseJSON =
+    withObject "signup params" $ \o -> do
+      reqFirstName <- o .: "first_name"
+      reqLastName <- o .: "last_name"
+      reqEmail <- o .: "email"
+      reqPassword <- o .: "password"
+      return Request {..}
+
+data Response = Response
+  { resUserToken :: !AccessToken
+  , resUserId :: !UserId
+  }
+
+instance ToJSON Response where
+  toJSON Response {..} =
+    object
+      [ "user_access_token" .= resUserToken
+      , "user_id" .= resUserId
+      ]
+
+mapRequest :: Request -> App.Params
+mapRequest Request {..} = App.Params reqFirstName reqLastName reqEmail reqPassword
+
+buildResponse :: (Entity User) -> Handler Response
+buildResponse (Entity userId User {..}) = do
+  let resUserToken = userAccessToken
+  let resUserId = userId
+  return Response {..}
+
+postSignupR :: Handler Value
+postSignupR = do
+  requestData <- mapRequest <$> requireCheckJsonBody
+  result <- runAppInHandler $ App.signup requestData
+  case result of
+    Left App.UserAlreadyExists -> sendResponseStatus status409 ("User already exists" :: Text)
+    Right value -> toJSON <$> buildResponse value
 {-# START_FILE src/Api/Import.hs #-}
 module Api.Import
   ( module Export
@@ -248,6 +304,22 @@ import Import hiding
   , logWarn
   , logWarnS
   )
+
+import Import as Export hiding
+  ( Handler
+  , LogLevel(..)
+  , logDebug
+  , logDebugS
+  , logError
+  , logErrorS
+  , logInfo
+  , logInfoS
+  , logOther
+  , logOtherS
+  , logWarn
+  , logWarnS
+  )
+
 
 import Api.Authorization as Export
 import Api.Routes as Export
@@ -545,6 +617,7 @@ module Model
   , Entity(..)
   , RawPassword
   , UTCTime
+  , genAccessToken
   , getCurrentTime
   , protectPassword
   ) where
@@ -581,6 +654,48 @@ User sql=users
   UniqueAccessToken accessToken
   deriving (Show)
 |]
+{-# START_FILE src/UseCases/Signup.hs #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module UseCases.Signup
+  ( Params(..)
+  , SignupError(..)
+  , signup
+  ) where
+
+import Import
+
+data Params = Params
+  { signupUserFirstName :: !UserName
+  , signupUserLastName :: !UserName
+  , signupUserEmail :: !EmailAddress
+  , signupUserPassword :: !RawPassword
+  }
+
+data SignupError =
+  UserAlreadyExists
+
+signupToUser :: Params -> App User
+signupToUser p = do
+  userPassword <- protectPassword $ signupUserPassword p
+  userAccessToken <- genAccessToken
+  now <- liftIO getCurrentTime
+  let userFirstName = signupUserFirstName p
+  let userLastName = signupUserLastName p
+  let userEmail = signupUserEmail p
+  let userCreatedAt = now
+  let userUpdatedAt = now
+  return User {..}
+
+signup :: Params -> App (Either SignupError (Entity User))
+signup params = do
+  existingUser <- getBy $ UniqueEmail (signupUserEmail params)
+  case existingUser of
+    Just _ -> return $ Left UserAlreadyExists
+    Nothing -> do
+      u <- signupToUser params
+      uId <- insert u
+      return $ Right (Entity uId u)
 {-# START_FILE src/Util/AccessToken.hs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
