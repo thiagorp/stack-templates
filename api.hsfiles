@@ -71,10 +71,48 @@ main = defaultMain
 {-# START_FILE app/Main.hs #-}
 module Main where
 
-import qualified Executables.Api as Api
+import Prelude (IO)
+
+import Executables.Api (run)
 
 main :: IO ()
-main = Api.run
+main = run
+{-# START_FILE app/PrintMigrations.hs #-}
+module PrintMigrations where
+
+import Prelude (IO)
+
+import Executables.PrintMigrations (run)
+
+main :: IO ()
+main = run
+{-# START_FILE bin/new_migration #-}
+#!/bin/bash
+
+if [ -z "$1" ]; then
+  echo "The migration name is missing"
+  exit 1
+fi
+
+touch "migrations/$(date "+%y%m%d%H%M")_$1.sql"
+{-# START_FILE bin/persistent_sync #-}
+#!/bin/bash
+
+stack build --fast
+
+MIGRATIONS="$(stack exec print-migrations)"
+
+if [ -z "$MIGRATIONS" ]; then
+  echo "Nothing to sync"
+  exit 1
+fi
+
+MIGRATION_FILE="migrations/$(date "+%y%m%d%H%M")_persistent_sync.sql"
+
+echo "$MIGRATIONS" > "$MIGRATION_FILE"
+
+echo "Migration file created: $MIGRATION_FILE"
+{-# START_FILE migrations/.keep #-}
 {-# START_FILE package.yaml #-}
 name: {{name}}
 
@@ -131,6 +169,17 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    dependencies:
+    - {{name}}
+
+  print-migrations:
+    main:                PrintMigrations.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -main-is PrintMigrations
     dependencies:
     - {{name}}
 
@@ -619,6 +668,22 @@ run = do
   port <- appPort
   app <- mkApp env
   Warp.runSettings (settings port) app
+
+{-# START_FILE src/Executables/PrintMigrations.hs #-}
+module Executables.PrintMigrations (run) where
+
+import RIO
+
+import Control.Monad.Logger
+import Database.Persist.Postgresql
+
+import Environment
+import Model
+
+run :: IO ()
+run = do
+  s <- pgSettings
+  runStdoutLoggingT $ withPostgresqlConn (pgUrl s) $ runSqlConn $ printMigration migrateAll
 
 {-# START_FILE src/Import.hs #-}
 {-# LANGUAGE NoImplicitPrelude #-}
