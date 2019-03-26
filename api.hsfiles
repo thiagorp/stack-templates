@@ -224,7 +224,7 @@ unauthorized = sendResponseStatus unauthorized401 ()
 userAuth :: (Entity User -> Handler a) -> Handler a
 userAuth handler = do
   authToken <- readToken
-  maybeUser <- runAppInHandler $ getBy (UniqueAccessToken authToken)
+  maybeUser <- runAppInHandler $ getBy (UniqueUserAccessToken authToken)
   case maybeUser of
     Just user -> handler user
     Nothing -> unauthorized
@@ -741,15 +741,15 @@ share
   [persistLowerCase|
 User sql=users
   Id UUID default=uuid_generate_v4()
-  firstName UserName sqltype=varchar(255)
-  lastName UserName sqltype=varchar(255)
-  email EmailAddress sqltype=varchar(255)
-  password SafePassword sqltype=varchar(255)
-  accessToken AccessToken sqltype=varchar(255)
+  firstName UserName
+  lastName UserName
+  email EmailAddress
+  password SafePassword
+  accessToken AccessToken
   createdAt UTCTime
   updatedAt UTCTime
-  UniqueEmail email
-  UniqueAccessToken accessToken
+  UniqueUserEmail email
+  UniqueUserAccessToken accessToken
   deriving (Show)
 |]
 {-# START_FILE src/UseCases/Login.hs #-}
@@ -776,7 +776,7 @@ verify password user =
 
 login :: Params -> App (Maybe User)
 login Params {..} = do
-  maybeUser <- getBy (UniqueEmail paramEmail)
+  maybeUser <- getBy (UniqueUserEmail paramEmail)
   case maybeUser of
     Nothing -> return Nothing
     Just (Entity _ user) -> return $ verify paramPassword user
@@ -815,7 +815,7 @@ signupToUser p = do
 
 signup :: Params -> App (Either SignupError (Entity User))
 signup params = do
-  existingUser <- getBy $ UniqueEmail (signupUserEmail params)
+  existingUser <- getBy $ UniqueUserEmail (signupUserEmail params)
   case existingUser of
     Just _ -> return $ Left UserAlreadyExists
     Nothing -> do
